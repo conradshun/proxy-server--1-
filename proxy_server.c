@@ -181,7 +181,7 @@ void handle_client(int client_socket) {
             return 0;
         }
 
-        const char *body = "<html><body><h1>Hello from my proxy server!</h1></body></html>";
+        const char *body = "<html><body><h1>67 proxy server</h1></body></html>";
         char response[512];
         snprintf(response, sizeof(response),
             "HTTP/1.1 200 OK\r\n"
