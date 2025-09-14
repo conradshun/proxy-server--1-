@@ -63,7 +63,6 @@ int main(int argc, char *argv[]) {
     signal(SIGCHLD, sigchld_handler);
 #endif
 
-    // Create socket
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket < 0) {
         perror("socket creation failed");
@@ -92,7 +91,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    printf("Server listening on port %d\n", port);
+    printf("Proxy server listening on port %d...\n", port);
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -154,7 +153,12 @@ void handle_client(int client_socket) {
     ssize_t bytes_received = recv(client_socket, request, sizeof(request) - 1, 0);
     if (bytes_received <= 0) {
         send_error_response(client_socket, 400, "Bad Request");
+        close(client_socket);
+#ifdef _WIN32
         return 0;
+#else
+        return;
+#endif
     }
 
     request[bytes_received] = '\0';
@@ -162,54 +166,59 @@ void handle_client(int client_socket) {
 
     if (parse_http_request(request, method, host, path, &port) != 0) {
         send_error_response(client_socket, 400, "Bad Request");
+        close(client_socket);
+#ifdef _WIN32
         return 0;
+#else
+        return;
+#endif
+    }
+
+    // Explicit method check (per UML)
+    if (strcmp(method, "GET") && strcmp(method, "POST") && strcmp(method, "HEAD")) {
+        send_error_response(client_socket, 405, "Method Not Allowed");
+        close(client_socket);
+#ifdef _WIN32
+        return 0;
+#else
+        return;
+#endif
     }
 
     printf("Parsed: Method=%s, Host=%s, Port=%d, Path=%s\n",
            method, host, port, path);
 
-    // --- Serve local responses if this is for ourselves ---
+    // Local response example (localhost:8080)
     if (strcmp(host, "localhost") == 0 && port == 8080) {
-        if (strcmp(path, "/favicon.ico") == 0) {
-            const char *favicon_resp =
-                "HTTP/1.1 204 No Content\r\n"
-                "Connection: close\r\n\r\n";
-            send(client_socket, favicon_resp, strlen(favicon_resp), 0);
-#ifdef _WIN32
-            close(client_socket);
-#endif
-            return 0;
-        }
-
-        const char *body =   "<!DOCTYPE html>"
-                             "<html>"
-                               "<head><title>67 Proxy Server</title></head>"
-                               "<body>"
-                              "<h1>67 proxy server</h1>"
-                             "</body>"
-                             "</html>";
+        const char *body =
+            "<!DOCTYPE html><html><head><title>67 Proxy Server</title></head>"
+            "<body><h1>Proxy is running</h1></body></html>";
         char response[512];
         snprintf(response, sizeof(response),
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "Content-Length: %zu\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-            "%s",
+            "Connection: close\r\n\r\n%s",
             strlen(body), body);
-
         send(client_socket, response, strlen(response), 0);
-#ifdef _WIN32
         close(client_socket);
-#endif
+#ifdef _WIN32
         return 0;
+#else
+        return;
+#endif
     }
 
-    // --- Normal proxy behavior for other hosts ---
+    // Normal proxy forwarding
     char *rest_of_request = strstr(request, "\r\n");
     if (!rest_of_request) {
         send_error_response(client_socket, 400, "Bad Request");
+        close(client_socket);
+#ifdef _WIN32
         return 0;
+#else
+        return;
+#endif
     }
     rest_of_request += 2;
 
@@ -220,14 +229,24 @@ void handle_client(int client_socket) {
     int server_socket = connect_to_server(host, port);
     if (server_socket < 0) {
         send_error_response(client_socket, 502, "Bad Gateway");
+        close(client_socket);
+#ifdef _WIN32
         return 0;
+#else
+        return;
+#endif
     }
 
     if (send(server_socket, new_request, new_request_len, 0) < 0) {
         perror("Failed to send request to server");
         close(server_socket);
         send_error_response(client_socket, 502, "Bad Gateway");
+        close(client_socket);
+#ifdef _WIN32
         return 0;
+#else
+        return;
+#endif
     }
 
     char buffer[BUFFER_SIZE];
@@ -240,10 +259,13 @@ void handle_client(int client_socket) {
     }
 
     close(server_socket);
-#ifdef _WIN32
     close(client_socket);
-#endif
+
+#ifdef _WIN32
     return 0;
+#else
+    return;
+#endif
 }
 
 int parse_http_request(char *request, char *method, char *host, char *path, int *port) {
@@ -271,17 +293,13 @@ int parse_http_request(char *request, char *method, char *host, char *path, int 
         if (path_start) {
             strcpy(path, path_start);
             *path_start = '\0';
-        } else {
-            strcpy(path, "/");
         }
         char *port_start = strchr(url_start, ':');
         if (port_start) {
             *port_start = '\0';
             *port = atoi(port_start + 1);
-            strcpy(host, url_start);
-        } else {
-            strcpy(host, url_start);
         }
+        strcpy(host, url_start);
     } else {
         strcpy(path, url);
         char *headers = strdup(request);
@@ -337,15 +355,15 @@ int connect_to_server(const char *host, int port) {
 }
 
 void send_error_response(int socket, int error_code, const char *message) {
+    char body[256];
+    snprintf(body, sizeof(body), "<html><body><h1>%d %s</h1></body></html>", error_code, message);
     char response[512];
     snprintf(response, sizeof(response),
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: text/html\r\n"
-        "Content-Length: %u\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "<html><body><h1>%d %s</h1></body></html>",
-        error_code, message, (unsigned)(strlen(message) + 38), error_code, message);
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n%s",
+        error_code, message, strlen(body), body);
     send(socket, response, strlen(response), 0);
 }
 
